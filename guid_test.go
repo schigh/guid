@@ -99,7 +99,6 @@ func TestGUIDX(t *testing.T) {
 		type test struct {
 			name        string
 			str         string
-			expect      GUID
 			expectErr   bool
 			errContains string
 		}

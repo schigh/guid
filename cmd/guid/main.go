@@ -132,7 +132,7 @@ func scanGUID(s string, isJSON bool) {
 			"random":      fmt.Sprintf("%d", g.Random()),
 		}
 		data, _ := json.Marshal(out)
-		_, _ = fmt.Fprintf(os.Stdout, string(data))
+		_, _ = os.Stdout.Write(data)
 		return
 	}
 
