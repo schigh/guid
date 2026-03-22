@@ -2,233 +2,264 @@
 
 **G**lobally **U**nique **Id**entifiers
 
-This library generates globally unique 26-byte portable and serializable identifiers that are also highly collision-resistant and introspectable.
+A zero-dependency Go library for generating globally unique, collision-resistant, introspectable 28-character identifiers. Similar in purpose to UUID v7, but with a compact base36 encoding and a richer internal structure.
 
-## Godoc
-[here](./GODOC.md)
+## Structure
 
-## Generator
-```shell
-> go install github.com/schigh/guid/cmd/guid@latest
+A GUID is a 28-byte array that serializes to a 28-character base36 string:
+
 ```
-Output of `guid --help`:
-```
-Usage of guid:
-  -n uint
-    	number of guids to generate (default 1)
-  -o string
-    	output file (default "--stdout--")
-  -p string
-    	guid prefix
-  -sep string
-    	separator for multiple guids (default "--newline--")
-  -serial
-    	generate all guids serially
+[prefix 2][timestamp 8][fingerprint 4][counter 4][random 10]
 ```
 
-## Usage
+| Field       | Size     | Description                                      |
+|-------------|----------|--------------------------------------------------|
+| Prefix      | 2 chars  | Application-defined tag (default: `id`)           |
+| Timestamp   | 8 chars  | Millisecond-precision UTC time                    |
+| Fingerprint | 4 chars  | Derived from PID and hostname                     |
+| Counter     | 4 chars  | Monotonic counter (wraps at 36^4)                 |
+| Random      | 10 chars | Cryptographic randomness from `crypto/rand`       |
 
-### Default Behavior
+Collision resistance comes from combining all five fields. Within a single process on a single machine, the counter and ~51.7 bits of randomness (36^10 possible values) make collisions extremely unlikely even at high throughput.
 
-#### Generating
+## Install
 
-The default signature for generating a GUID is `New() (GUID, error)`:
+Library:
 
-```go
-1	package main
-2
-3	import (
-4		"fmt"
-5
-6		"github.com/schigh/guid"
-7	)
-8
-9	func main() {
-10		g, err := guid.New()
-11		if err != nil {
-12			panic(err)
-13		}
-14
-15		fmt.Println(g)
-16	}
+```
+go get github.com/schigh/guid
 ```
 
-The in the example above, the GUID generated would resemble something like:
+CLI:
 
-`nwkkpkmep11m4l0000ykysk8xb`
-
-This is the default behavior out of the box.  The odds of `guid.New` returning an error are extremely low and are bound to the particular implementation of `io.Reader` used when generating random bytes.  By default, the `crypto/rand` reader is used, so any errors returned would be due to a broken syscall.  In any event, the error should not be ignored.
-
-#### Parsing
-
-Parsing data into a GUID can be accomplished by calling either `Parse(b []byte)` or `ParseString(s string)`.  `ParseString` just calls `Parse` internally.
-
-```go
-1	package main
-2
-3	import (
-4		"fmt"
-5
-6		"github.com/schigh/guid"
-7	)
-8
-9	func main() {
-10		s := "nwkkpkmep11m4l0000ykysk8xb"
-11		g, err := guid.ParseString(s)
-12		if err != nil {
-13			panic(err)
-14		}
-15
-16		fmt.Println(g)
-17	}
+```
+go install github.com/schigh/guid/cmd/guid@latest
 ```
 
-The above example would output `nwkkpkmep11m4l0000ykysk8xb`.
+## Library Usage
 
-## Customization
+### Generating
 
-### Prefix
-
-By default, the first two prefix bytes of a GUID are `0x6e` and `0x77` (which serialize to `'n'` and `'w'`).  This behavior can be customized at application start up by calling the function `SetGlobalPrefixBytes(b1, b2 byte)`:
-
-```go
-1	package main
-2
-3	import (
-4		"fmt"
-5
-6		"github.com/schigh/guid"
-7	)
-8
-9	func main() {
-10		guid.SetGlobalPrefixBytes('4', '2')
-11		g, err := guid.New()
-12		if err != nil {
-13			panic(err)
-14		}
-15
-16		fmt.Println(g)
-17	}
-```
-
-The above example would output something like `42kkpld1811pmd0000ylxbpvt6`.  Note that the prefix bytes should be printable ASCII characters, which can be conveniently wrapped with single quotes.  Calling `guid.SetGlobalPrefixBytes(4, 2)` will cause the application to panic.  Normal convention for a panicking library function is to prepend it with `Must...`, but this func does not, since it's internal to NTWRK.
-
-Also note that subsequent calls to `guid.SetGlobalPrefixBytes` are no-ops.
-
-#### Prefix per GUID
-
-You can also easily set the prefix per GUID by either manually setting it:
-
-```go
-g := guid.New()
-g[0], g[1] = '4', '2'
-```
-
-Or you can use the option `WithPrefixBytes`:
-
-```go
-g := guid.New(guid.WithPrefixBytes('4', '2'))
-```
-
-### BYO Generator
-
-GUID uses a global instance of a `Generator` interface:
-
-```go
-// Generator defines the contract for generating GUIDs
-type Generator interface {
-    Generate() (GUID, error)
-}
-```
-
-It is extremely unlikely that you'll ever need to use a custom generator.  If you do, just implement the `Generator` interface and call `SetGlobalGenerator`:
-
-```go
-1	package main
-2
-3	import (
-4		"fmt"
-5
-6		"github.com/schigh/guid"
-7	)
-8
-9	type myGen struct{}
-10
-11	func (myGen) Generate() (guid.GUID, error) {
-12		// hi000000010001000100010001
-13		return guid.GUID{
-14			'h', 'i', // prefix
-15			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ts
-16			0x02, 0x00, 0x00, 0x00, // fp
-17			0x02, 0x00, 0x00, 0x00, // incr counter
-18			0x02, 0x00, 0x00, 0x00, // decr counter
-19			0x02, 0x00, 0x00, 0x00, // rnd
-20		}, nil
-21	}
-22
-23	func main() {
-24		guid.SetGlobalGenerator(myGen{})
-25		g, err := guid.New()
-26		if err != nil {
-27			panic(err)
-28		}
-29
-30		fmt.Println(g)
-31	}
-```
-
-You can also just return `guid.TestGUID` from the generator if you like.  `guid.TestGUID` serializes to `test0test0test0test0test00`
-
-## Introspection
-
-A key feature of GUID is that it can be introspected.  The most common introspection will be to examine the prefix bytes, but every component of the GUID can be extracted:
+`New` returns a GUID and an error. `MustNew` is a convenience wrapper that panics on error instead (safe in practice, since `crypto/rand` rarely fails).
 
 ```go
 package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/schigh/guid"
 )
 
 func main() {
-	s := "nwkkpol4ar24bh0000yq3rus7i"
-	g, err := guid.ParseString(s)
+	// returns an error
+	g, err := guid.New()
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
+	fmt.Println(g)
+	// output: idlen38z4r2w1r0000rq9az8y8xv
 
-	// get prefix bytes
-	b1, b2 := g.PrefixBytes()
-	fmt.Printf("Prefix Bytes: %#x, %#x\n", b1, b2)
-
-	// get timestamp
-	t := g.Time()
-	fmt.Printf("Time: %v\n", t)
-
-	// get fingerprint
-	fp := g.Fingerprint()
-	fmt.Printf("Fingerprint: %#x\n", fp)
-
-	// get counters
-	incr, decr := g.Counters()
-	fmt.Printf("Increment Counter: %d\n", incr)
-	fmt.Printf("Decrement Counter: %d\n", decr)
-
-	// get random noise
-	rnd := g.Random()
-	fmt.Printf("Random: %#x\n", rnd)
+	// panics on error (convenient when failure is not expected)
+	g2 := guid.MustNew()
+	fmt.Println(g2)
 }
 ```
 
-The above code will output the following:
+### Parsing
+
+Parse a GUID from a string or byte slice. `ParseString` calls `Parse` internally.
+
+```go
+s := "idlen38z4r2w1r0000rq9az8y8xv"
+g, err := guid.ParseString(s)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(g) // idlen38z4r2w1r0000rq9az8y8xv
+```
+
+### Introspection
+
+Every component of a GUID can be extracted:
+
+```go
+g := guid.MustNew()
+
+b1, b2 := g.PrefixBytes()
+fmt.Printf("Prefix:      %c%c\n", b1, b2)
+
+fmt.Printf("Timestamp:   %v\n", g.Time())
+fmt.Printf("Fingerprint: %d\n", g.Fingerprint())
+fmt.Printf("Counter:     %d\n", g.Counter())
+fmt.Printf("Random:      %d\n", g.Random())
+```
+
+### Slugs
+
+A slug is a lossy 12-character abbreviation of a GUID, useful as a short disambiguation key in URLs or small documents. The original GUID cannot be recovered from a slug.
+
+```go
+g := guid.MustNew()
+fmt.Println(g.Slug()) // e.g. "8z4r00y8xv3q"
+```
+
+### Prefix Customization
+
+The default prefix bytes are `i` and `d`. You can change them globally (once, at startup) or per GUID.
+
+**Global prefix (called once, subsequent calls are no-ops):**
+
+```go
+err := guid.SetGlobalPrefixBytes('u', 's')
+if err != nil {
+	log.Fatal(err)
+}
+g := guid.MustNew()
+fmt.Println(g) // us...
+```
+
+Prefix bytes must be lowercase base36 characters (`0-9`, `a-z`). `SetGlobalPrefixBytes` returns an error for invalid bytes. `MustSetGlobalPrefixBytes` panics instead.
+
+**Per-GUID prefix using an option:**
+
+```go
+g := guid.MustNew(guid.WithPrefixBytes('a', 'b'))
+fmt.Println(g) // ab...
+```
+
+**Per-GUID prefix by direct assignment:**
+
+```go
+g := guid.MustNew()
+g[0], g[1] = 'a', 'b'
+```
+
+### Signing
+
+A GUID can watermark data by folding its bytes into a SHA256 hash. This is not cryptographic signing. It is a lightweight mechanism for associating a GUID with a piece of data.
+
+```go
+g := guid.MustNew()
+data := []byte("some payload")
+
+sig := g.Sign(data)
+fmt.Printf("Signature: %s\n", sig) // hex-encoded
+
+// verify
+if g.DidSign(string(sig)) {
+	fmt.Println("verified")
+}
+```
+
+Note: `Sign` uses bitwise OR to fold GUID bytes into the hash. Multiple GUIDs can appear to have signed the same data (false positives are possible). This is suitable for tagging and tracing, not for authentication.
+
+### Custom Generator
+
+The library uses a global `Generator` for all GUID creation. You can replace it once at startup for testing or to inject custom time/randomness sources.
+
+```go
+type Generator interface {
+	Generate() (GUID, error)
+}
+```
+
+```go
+guid.SetGlobalGenerator(myCustomGenerator{})
+```
+
+Subsequent calls to `SetGlobalGenerator` are no-ops. For testing, you can use `guid.TestGUID` as a fixed value.
+
+### Serialization
+
+GUID implements the following standard interfaces:
+
+| Interface                    | Method            |
+|------------------------------|-------------------|
+| `fmt.Stringer`               | `String()`        |
+| `json.Marshaler`             | `MarshalJSON()`   |
+| `json.Unmarshaler`           | `UnmarshalJSON()` |
+| `sql.Scanner`                | `Scan()`          |
+| `driver.Valuer`              | `Value()`         |
+| `encoding.BinaryMarshaler`   | `MarshalBinary()` |
+| `encoding.BinaryUnmarshaler` | `UnmarshalBinary()` |
+| `encoding.TextMarshaler`     | `MarshalText()`   |
+| `encoding.TextUnmarshaler`   | `UnmarshalText()` |
+| `gob.GobEncoder`             | `GobEncode()`     |
+| `gob.GobDecoder`             | `GobDecode()`     |
+
+This means GUIDs work out of the box with `encoding/json`, `database/sql`, `encoding/gob`, and any system that uses the standard marshaling interfaces.
+
+## CLI Usage
 
 ```
-Prefix Bytes: 0x6e, 0x77
-Time: 2021-02-03 12:04:39.171 -0500 EST
-Fingerprint: 0x1825d
-Increment Counter: 0
-Decrement Counter: 1620135
-Random: 0x15ea4e
+go install github.com/schigh/guid/cmd/guid@latest
 ```
+
+### Generate GUIDs
+
+```shell
+# generate one GUID
+$ guid
+idlen38z4r2w1r0000rq9az8y8xv
+
+# generate 5 GUIDs
+$ guid -n 5
+
+# generate with a custom prefix
+$ guid -p ab
+
+# generate slugs instead of full GUIDs
+$ guid -slug
+
+# generate serially (default is concurrent)
+$ guid -serial
+
+# use a custom separator
+$ guid -n 3 -sep ","
+
+# write output to a file
+$ guid -n 10 -o guids.txt
+```
+
+### Inspect a GUID
+
+```shell
+$ guid -scan idlen38z4r2w1r0000rq9az8y8xv
+PREFIX:      nw
+TIMESTAMP:   Mon Jan  2 15:04:05 2006
+FINGERPRINT: 12345
+COUNTER:     0
+RANDOM:      987654321
+```
+
+JSON output:
+
+```shell
+$ guid -scan idlen38z4r2w1r0000rq9az8y8xv -json
+{"counter":"0","fingerprint":"12345","prefix":"nw","random":"987654321","timestamp":"Mon Jan  2 15:04:05 2006"}
+```
+
+### Full Flag Reference
+
+| Flag      | Default       | Description                              |
+|-----------|---------------|------------------------------------------|
+| `-n`      | `1`           | Number of GUIDs to generate              |
+| `-p`      | (none)        | Two-character prefix for generated GUIDs |
+| `-sep`    | newline       | Separator between multiple GUIDs         |
+| `-serial` | `false`       | Generate GUIDs serially (not concurrent) |
+| `-o`      | stdout        | Output file path                         |
+| `-slug`   | `false`       | Output 12-character slugs instead        |
+| `-scan`   | (none)        | Inspect a GUID and print its components  |
+| `-json`   | `false`       | Output scan results as JSON              |
+
+## Thread Safety
+
+GUID generation is safe for concurrent use. The global generator uses a mutex to protect the monotonic counter, and all other fields (timestamp, fingerprint, random) are either goroutine-local or read from `crypto/rand`.
+
+The global prefix and generator are set-once values protected by `sync.Once`.
+
+## License
+
+See [LICENSE](./LICENSE).

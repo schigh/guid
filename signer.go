@@ -15,18 +15,18 @@ func (g GUID) Sign(in []byte) []byte {
 	// get a hash of the input
 	sum := sha256.Sum256(in) // [32]byte
 
-	// add the book ends
-	// fold 1st 12 bytes from non-prefix part of the guid
-	// fold last 12 bytes from guid
+	// fold all GUID bytes into the hash
+	// forward: g[2..14] into sum[0..12]
+	// reverse: g[27..15] into sum[31..19]
 	j := sha256.Size - 1
-	for i := 2; i < 14; i++ {
+	for i := 2; i < 15; i++ {
 		sum[i-2] = sum[i-2] | g[i]
-		sum[j] = sum[j] | g[j-6]
+		sum[j] = sum[j] | g[j-4]
 		j--
 	}
 	// fold in the prefix
-	sum[12] = sum[12] | g[0]
-	sum[13] = sum[13] | g[1]
+	sum[13] = sum[13] | g[0]
+	sum[14] = sum[14] | g[1]
 
 	out := make([]byte, hex.EncodedLen(len(sum)))
 	hex.Encode(out, sum[:])
@@ -46,18 +46,18 @@ func (g GUID) DidSign(in string) bool {
 		return false
 	}
 
-	if sum[12]&g[0] != g[0] {
+	if sum[13]&g[0] != g[0] {
 		return false
 	}
-	if sum[13]&g[1] != g[1] {
+	if sum[14]&g[1] != g[1] {
 		return false
 	}
 	j := sha256.Size - 1
-	for i := 2; i < 14; i++ {
+	for i := 2; i < 15; i++ {
 		if sum[i-2]&g[i] != g[i] {
 			return false
 		}
-		if sum[j]&g[j-6] != g[j-6] {
+		if sum[j]&g[j-4] != g[j-4] {
 			return false
 		}
 		j--

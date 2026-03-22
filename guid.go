@@ -11,7 +11,7 @@ import (
 
 const (
 	// byteSize is the size of a GUID, in bytes
-	byteSize = 26
+	byteSize = 28
 
 	// blockSize is the size in bits of byte-to-int32 conversions
 	blockSize = 64
@@ -26,24 +26,22 @@ const (
 	fpEnd   = fpStart + fieldSize
 	icStart = fpEnd
 	icEnd   = icStart + fieldSize
-	dcStart = icEnd
-	dcEnd   = dcStart + fieldSize
-	rdStart = dcEnd
-	rdEnd   = rdStart + fieldSize
+	rdStart = icEnd
+	rdEnd   = byteSize
 
 	// base is used for all encoding operations. CUIDs use a base36 encoding of
 	// the binary data to generate a string.
 	base = 36
 
-	maxInt  = 1679616 // 36^4 or base^fieldSize
-	i32Buff = 1048576 // buffer for lower int32 byte sums (for random number generation)
+	maxInt    = 1679616           // 36^4 or base^fieldSize
+	maxRandom = 3656158440062976 // 36^10
 )
 
 // GUID is a globally unique identifier
 //
-//	prefix  timestamp                 fingerprint   incr          decr          random
+//	prefix  timestamp                 fingerprint   counter       random
 //
-// [[b, b], [b, b, b, b, b, b, b, b], [b, b, b, b], [b, b, b, b], [b, b, b, b], [b, b, b, b]]
+// [[b, b], [b, b, b, b, b, b, b, b], [b, b, b, b], [b, b, b, b], [b, b, b, b, b, b, b, b, b, b]]
 type GUID [byteSize]byte
 
 // Option is a function that allows for mutating a GUID
@@ -59,18 +57,9 @@ func WithPrefixBytes(b1, b2 byte) Option {
 	}
 }
 
-// New will return only a GUID using the global generator or panic (less safe way, but unlikely to fail)
-func New(opts ...Option) GUID {
-	g, err := NewRandom(opts...)
-	if err != nil {
-		panic(err)
-	}
-	return g
-}
-
-// NewRandom will create a GUID using the global generator or return an error (this is the safer way)
-func NewRandom(opts ...Option) (GUID, error) {
-	out, err := globalGenerator.Generate()
+// New creates a GUID using the global generator or returns an error.
+func New(opts ...Option) (GUID, error) {
+	out, err := globalGen.Load().(Generator).Generate()
 	if err != nil {
 		return GUID{}, err
 	}
@@ -82,6 +71,15 @@ func NewRandom(opts ...Option) (GUID, error) {
 	return out, nil
 }
 
+// MustNew creates a GUID using the global generator or panics on error.
+func MustNew(opts ...Option) GUID {
+	g, err := New(opts...)
+	if err != nil {
+		panic(err)
+	}
+	return g
+}
+
 // PrefixBytes returns the two GUID prefix
 // bytes individually
 func (g GUID) PrefixBytes() (byte, byte) {
@@ -90,7 +88,7 @@ func (g GUID) PrefixBytes() (byte, byte) {
 
 // SetTime inserts the unix timestamp into the GUID
 func (g GUID) SetTime(t time.Time) GUID {
-	_ = binary.PutVarint(g[tsStart:tsEnd], time.Duration(t.UnixNano()).Milliseconds())
+	_ = binary.PutVarint(g[tsStart:tsEnd], t.UnixNano()/1e6)
 	return g
 }
 
@@ -112,39 +110,34 @@ func (g GUID) Fingerprint() int32 {
 	return int32(v)
 }
 
-// SetCounters sets the increment and decrement counters
-func (g GUID) SetCounters(incr, decr int32) GUID {
-	_ = binary.PutVarint(g[icStart:icEnd], filter(incr))
-	_ = binary.PutVarint(g[dcStart:dcEnd], filter(decr))
-
+// SetCounter sets the monotonic counter value
+func (g GUID) SetCounter(v int32) GUID {
+	_ = binary.PutVarint(g[icStart:icEnd], filter(v))
 	return g
 }
 
-// Counters returns the incrementer and decrementer counters.
-func (g GUID) Counters() (int32, int32) {
-	incr, _ := binary.Varint(g[icStart:icEnd])
-	decr, _ := binary.Varint(g[dcStart:dcEnd])
-
-	return int32(incr), int32(decr)
+// Counter returns the monotonic counter value.
+func (g GUID) Counter() int32 {
+	v, _ := binary.Varint(g[icStart:icEnd])
+	return int32(v)
 }
 
-// SetRandom adds an 8-byte random Word to the GUID
-func (g GUID) SetRandom(v int32) GUID {
-	_ = binary.PutVarint(g[rdStart:rdEnd], filter(v))
+// SetRandom adds the random component to the GUID
+func (g GUID) SetRandom(v int64) GUID {
+	_ = binary.PutVarint(g[rdStart:rdEnd], filterRandom(v))
 	return g
 }
 
 // Random returns the random value encoded in the GUID.
-func (g GUID) Random() int32 {
+func (g GUID) Random() int64 {
 	v, _ := binary.Varint(g[rdStart:rdEnd])
-	return int32(v)
+	return v
 }
 
 func (g GUID) String() string {
 	nanos, _ := binary.Varint(g[tsStart:tsEnd])
 	fingerprint, _ := binary.Varint(g[fpStart:fpEnd])
-	incr, _ := binary.Varint(g[icStart:icEnd])
-	decr, _ := binary.Varint(g[dcStart:dcEnd])
+	counter, _ := binary.Varint(g[icStart:icEnd])
 	random, _ := binary.Varint(g[rdStart:rdEnd])
 
 	sb := strings.Builder{}
@@ -152,9 +145,8 @@ func (g GUID) String() string {
 	sb.Write(g[0:2])
 	sb.WriteString(leftPad(strconv.FormatInt(nanos, base), fieldSize*2))
 	sb.WriteString(leftPad(strconv.FormatInt(fingerprint, base), fieldSize))
-	sb.WriteString(leftPad(strconv.FormatInt(incr, base), fieldSize))
-	sb.WriteString(leftPad(strconv.FormatInt(decr, base), fieldSize))
-	sb.WriteString(leftPad(strconv.FormatInt(random, base), fieldSize))
+	sb.WriteString(leftPad(strconv.FormatInt(counter, base), fieldSize))
+	sb.WriteString(leftPad(strconv.FormatInt(random, base), rdEnd-rdStart))
 
 	return sb.String()
 }
@@ -166,19 +158,19 @@ func (g GUID) String() string {
 func (g GUID) Slug() string { //nolint:gocritic // complains about pointer semantics
 	/*
 		To create a slug, we take a regular guid and remove the prefix,
-		remove the 32 MSBs (4 bytes) from the time bytes, truncate counters,
-		and include the random.
-		| PREFIX  | TIMESTAMP       | FP      | INCR    | DECR    | RANDOM  |
-		| 0 0     | 0 0 0 0 0 0 0 0 | 0 0 0 0 | 0 0 0 0 | 0 0 0 0 | 0 0 0 0 |
-		| PREFIX  | TIMESTAMP       | FP      | INCR    | DECR    | RANDOM  |
-		| - -     | - - - - 0 0 0 0 | - - - - | - - 0 0 | - - 0 0 | 0 0 0 0 |
-		  1 2       3 4 5 6 7 8 9 10  11121314  15161718  19202122  23242526
-		  0 1       2 3 4 5 6 7 8 09  10111213  14151617  18192021  22232425
+		remove the 32 MSBs (4 bytes) from the time bytes, truncate the counter,
+		and include part of the random.
+		| PREFIX  | TIMESTAMP       | FP      | COUNTER | RANDOM              |
+		| 0 0     | 0 0 0 0 0 0 0 0 | 0 0 0 0 | 0 0 0 0 | 0 0 0 0 0 0 0 0 0 0 |
+		| PREFIX  | TIMESTAMP       | FP      | COUNTER | RANDOM              |
+		| - -     | - - - - 0 0 0 0 | - - - - | - - 0 0 | - - - - 0 0 0 0 0 0 |
+		  1 2       3 4 5 6 7 8 9 10  11121314  15161718  192021222324252627 28
+		  0 1       2 3 4 5 6 7 8 09  10111213  14151617  181920212223242526 27
 	*/
 	gg := g.String()
 	out := [12]byte{
-		// TIMESTAMP                INCR            DECR            RANDOM
-		gg[6], gg[7], gg[8], gg[9], gg[16], gg[17], gg[20], gg[21], gg[22], gg[23], gg[24], gg[25],
+		// TIMESTAMP                COUNTER         RANDOM
+		gg[6], gg[7], gg[8], gg[9], gg[16], gg[17], gg[22], gg[23], gg[24], gg[25], gg[26], gg[27],
 	}
 	return string(out[:])
 }
@@ -192,33 +184,29 @@ func Parse(in []byte) (GUID, error) {
 	g[0] = in[0]
 	g[1] = in[1]
 
-	t, err := strconv.ParseInt(string(in[tsStart:tsEnd]), base, blockSize)
+	t, err := strconv.ParseUint(string(in[tsStart:tsEnd]), base, blockSize)
 	if err != nil {
 		return GUID{}, fmt.Errorf("guid.Parse: invalid time value '%s': %w", in[tsStart:tsEnd], err)
 	}
-	g = g.SetTime(time.Unix(0, t*1e6))
+	g = g.SetTime(time.Unix(0, int64(t)*1e6))
 
-	fingerprint, err := strconv.ParseInt(string(in[fpStart:fpEnd]), base, blockSize)
+	fingerprint, err := strconv.ParseUint(string(in[fpStart:fpEnd]), base, blockSize)
 	if err != nil {
 		return GUID{}, fmt.Errorf("guid.Parse: invalid fingerprint value '%s': %w", in[fpStart:fpEnd], err)
 	}
 	g = g.SetFingerprint(int32(fingerprint))
 
-	incr, err := strconv.ParseInt(string(in[icStart:icEnd]), base, blockSize)
+	counter, err := strconv.ParseUint(string(in[icStart:icEnd]), base, blockSize)
 	if err != nil {
-		return GUID{}, fmt.Errorf("guid.Parse: invalid increment counter value '%s': %w", in[icStart:icEnd], err)
+		return GUID{}, fmt.Errorf("guid.Parse: invalid counter value '%s': %w", in[icStart:icEnd], err)
 	}
-	decr, err := strconv.ParseInt(string(in[dcStart:dcEnd]), base, blockSize)
-	if err != nil {
-		return GUID{}, fmt.Errorf("guid.Parse: invalid decrement counter value '%s': %w", in[dcStart:dcEnd], err)
-	}
-	g = g.SetCounters(int32(incr), int32(decr))
+	g = g.SetCounter(int32(counter))
 
-	r, err := strconv.ParseInt(string(in[rdStart:rdEnd]), base, blockSize)
+	r, err := strconv.ParseUint(string(in[rdStart:rdEnd]), base, blockSize)
 	if err != nil {
 		return GUID{}, fmt.Errorf("guid.Parse: invalid random value '%s': %w", in[rdStart:rdEnd], err)
 	}
-	g = g.SetRandom(int32(r))
+	g = g.SetRandom(int64(r))
 
 	return g, nil
 }
@@ -262,7 +250,7 @@ func (g *GUID) UnmarshalJSON(b []byte) error {
 }
 
 // Scan implements sql.Scanner
-func (g *GUID) Scan(v interface{}) error {
+func (g *GUID) Scan(v any) error {
 	if v == nil {
 		return nil
 	}

@@ -3,44 +3,56 @@ package guid
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"sync"
 	"sync/atomic"
 )
 
+var globalPrefix atomic.Value // stores [2]byte
+
+func init() {
+	globalPrefix.Store([2]byte{'i', 'd'})
+}
+
 var (
-	fp           = int32(-1)
-	globalPrefix = [2]byte{'n', 'w'}
-	prefixOnce   sync.Once
+	fpOnce     sync.Once
+	fp         int32
+	prefixOnce sync.Once
 
 	// TestGUID is a nonsense GUID used for testing.
-	// Its printable value is:
-	// test0test0test0test0test00
 	TestGUID = GUID{
 		0x74, 0x65, // prefix
 		0xa8, 0xd9, 0xac, 0xde, 0xb2, 0x83, 0x1, 0x0, // ts
 		0xda, 0xc0, 0xa7, 0x1, // fp
-		0xc8, 0xd3, 0x4, 0x0, // incr
-		0xc4, 0xa5, 0xa5, 0x1, // decr
-		0xa0, 0x87, 0xa4, 0x1, // rnd
+		0xc8, 0xd3, 0x4, 0x0, // counter
+		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, // rnd
 	}
 )
 
 // SetGlobalPrefixBytes is a global initializer for GUID prefixes.
-// The default prefix bytes are 'n' and 'w'.  This function can only
-// be called once per execution.  Subsequent calls are no-ops.
-// If one or both of the input bytes are not printable ascii characters
-// in the base36 charset, this function will panic.
-// !!! Panics triggered here must not be caught, or suppressed if they are caught.
-func SetGlobalPrefixBytes(b1, b2 byte) {
+// The default prefix bytes are 'i' and 'd'. This function can only
+// be called once successfully per execution. Subsequent calls are no-ops.
+// Prefix bytes must be lowercase base36 characters (0-9, a-z).
+// Invalid bytes return an error without consuming the one-shot,
+// so a subsequent call with valid bytes will still succeed.
+func SetGlobalPrefixBytes(b1, b2 byte) error {
+	if !(isValidPrefixByte(b1) && isValidPrefixByte(b2)) {
+		return fmt.Errorf("guid.SetGlobalPrefixBytes: prefix bytes must be base36-compatible and lowercase")
+	}
 	prefixOnce.Do(func() {
-		if !(isValidPrefixByte(b1) && isValidPrefixByte(b2)) {
-			panic("guid.SetGlobalPrefixBytes: prefix bytes must be base36-compatible and lowercase")
-		}
-		globalPrefix[0] = b1
-		globalPrefix[1] = b2
+		globalPrefix.Store([2]byte{b1, b2})
 	})
+	return nil
+}
+
+// MustSetGlobalPrefixBytes calls SetGlobalPrefixBytes and panics on error.
+func MustSetGlobalPrefixBytes(b1, b2 byte) {
+	if err := SetGlobalPrefixBytes(b1, b2); err != nil {
+		panic(err)
+	}
 }
 
 // filter out of band integers.  The integers produced by the
@@ -55,23 +67,25 @@ func filter(v int32) int64 {
 	return int64(v)
 }
 
-// generate a random 32 bit int.
-// heavily influenced by fastrand in the runtime package of the standard library
-// https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf
-func randomInt32(reader io.Reader) (int32, error) {
-	b := [16]byte{}
+// filterRandom clamps random values to the valid range [0, maxRandom)
+func filterRandom(v int64) int64 {
+	if v < 0 {
+		v = -v
+	}
+	if v >= maxRandom {
+		return v % maxRandom
+	}
+	return v
+}
+
+// generate a random int64 from crypto/rand bytes
+func randomInt64(reader io.Reader) (int64, error) {
+	var b [8]byte
 	_, err := reader.Read(b[:])
 	if err != nil {
 		return 0, err
 	}
-
-	s0 := int32(b[0]+b[1]+b[2]+b[3]+b[4]+b[5]+b[6]+b[7]) | i32Buff
-	s1 := int32(b[8]+b[9]+b[10]+b[11]+b[12]+b[13]+b[14]+b[15]) | i32Buff
-
-	s1 ^= s1 << 17
-	s1 = s1 ^ s0 ^ s1>>7 ^ s0>>16
-	// we do need to do a modulo reduction here, but the cost is negligible
-	return s0 + s1%maxInt, nil
+	return int64(binary.BigEndian.Uint64(b[:]) % uint64(maxRandom)), nil
 }
 
 // pad a byte slice with the zero value until
@@ -109,15 +123,12 @@ func defaultPid() int32 {
 	return int32(os.Getpid())
 }
 
-// get the default pid of the device
+// get the default fingerprint of the device
 func defaultFingerprint() int32 {
-	lfp := atomic.LoadInt32(&fp)
-	if lfp == -1 {
-		lfp = defaultPid()<<2 | defaultHostname()>>2
-		atomic.StoreInt32(&fp, lfp)
-	}
-
-	return lfp
+	fpOnce.Do(func() {
+		fp = defaultPid()<<2 | defaultHostname()>>2
+	})
+	return fp
 }
 
 // prefix bytes must be printable base36 ASCII chars

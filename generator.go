@@ -4,8 +4,19 @@ import (
 	"crypto/rand"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+func init() {
+	globalGen.Store(Generator(&stdGenerator{
+		Random: rand.Reader,
+		Now: func() time.Time {
+			return time.Now().UTC()
+		},
+		Fingerprint: defaultFingerprint(),
+	}))
+}
 
 // Generator defines the contract for generating GUIDs
 type Generator interface {
@@ -17,29 +28,15 @@ type stdGenerator struct {
 	Fingerprint int32
 	Random      io.Reader
 	Now         func() time.Time
-	IncrCounter int32
-	DecrCounter int32
+	Counter     int32
 
-	incrLock        chan struct{}
-	decrLock        chan struct{}
-	createLocksOnce sync.Once
+	mu sync.Mutex
 }
 
 var (
-	// Normally global variables are bad practice because they
-	// introduce global state.  In this case, we want global state
-	// because the generator counters must be locked globally, and
-	// the fingerprint is global as well.
+	// globalGenerator is stored in an atomic.Value for safe concurrent access.
 	// nolint: gochecknoglobals
-	globalGenerator Generator = &stdGenerator{
-		Random: rand.Reader,
-		Now: func() time.Time {
-			return time.Now().UTC()
-		},
-		Fingerprint: defaultFingerprint(),
-		IncrCounter: 0,
-		DecrCounter: int32(time.Now().Unix() % int64(maxInt)),
-	}
+	globalGen atomic.Value
 
 	setOnce sync.Once
 )
@@ -52,50 +49,34 @@ var (
 // Subsequent calls are no-ops.
 func SetGlobalGenerator(g Generator) {
 	setOnce.Do(func() {
-		globalGenerator = g
+		globalGen.Store(g)
 	})
 }
 
-func (g *stdGenerator) randomInt32() (int32, error) {
-	return randomInt32(g.Random)
+func (g *stdGenerator) randomInt64() (int64, error) {
+	return randomInt64(g.Random)
 }
 
 // Generate will create a new GUID.
 func (g *stdGenerator) Generate() (GUID, error) {
-	g.createLocksOnce.Do(func() {
-		g.incrLock = make(chan struct{}, 1)
-		g.decrLock = make(chan struct{}, 1)
-	})
-
-	// increment counter lock
-	g.incrLock <- struct{}{}
-	incr := g.IncrCounter
-	g.IncrCounter += 1
-	if g.IncrCounter > maxInt {
-		g.IncrCounter = 0
+	g.mu.Lock()
+	counter := g.Counter
+	g.Counter++
+	if g.Counter >= maxInt {
+		g.Counter = 0
 	}
-	<-g.incrLock
+	g.mu.Unlock()
 
-	// get a random int32.  we sandwich this between
-	// the locks to increase entropy
-	r, err := g.randomInt32()
+	r, err := g.randomInt64()
 	if err != nil {
 		return GUID{}, err
 	}
 
-	// decrement counter lock
-	g.decrLock <- struct{}{}
-	decr := g.DecrCounter
-	g.DecrCounter -= 1
-	if g.DecrCounter < 0 {
-		g.DecrCounter = int32(maxInt)
-	}
-	<-g.decrLock
-
-	v := (GUID{}).SetTime(g.Now()).SetCounters(incr, decr).SetFingerprint(g.Fingerprint).SetRandom(r)
+	v := (GUID{}).SetTime(g.Now()).SetCounter(counter).SetFingerprint(g.Fingerprint).SetRandom(r)
 	// set prefix bytes
-	v[0] = globalPrefix[0]
-	v[1] = globalPrefix[1]
+	pfx := globalPrefix.Load().([2]byte)
+	v[0] = pfx[0]
+	v[1] = pfx[1]
 
 	return v, nil
 }

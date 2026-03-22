@@ -1,19 +1,16 @@
 package guid
 
 import (
-	"io"
-	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
-
-func void(...interface{}) {}
 
 type testReader struct {
 	buff []byte
 }
 
-func newTestReader(b [fieldSize]byte) *testReader {
+func newTestReader(b [8]byte) *testReader {
 	return &testReader{
 		buff: b[:],
 	}
@@ -25,80 +22,122 @@ func (t *testReader) Read(b []byte) (int, error) {
 }
 
 func TestGenerator(t *testing.T) {
-	type test struct {
-		name      string
-		fp        int32
-		random    io.Reader
-		now       func() time.Time
-		ic        int32
-		dc        int32
-		expect    GUID
-		expectErr bool
-	}
-
-	fp1, fp2, fp3 := int32(123456), int32(654321), int32(maxInt+1)
-	ic1, ic2, ic3 := int32(0), int32(1000), int32(maxInt)
-	dc1, dc2, dc3 := int32(maxInt-1), int32(1000), int32(0)
-	rd1, rd2, rd3 := int32(111111), int32(222222), int32(333333)
 	ts1 := int64(1600000000000000000) // 2020-09-13 07:26:40 -0500 EST
-	ts2 := int64(1611111111111000000) // 2021-01-19 21:51:51.111 -0500 EST
-	ts3 := int64(1633333333333000000) // 2021-10-04 02:42:13.333 -0500 EST
 
-	// quiet!
-	void(fp1, fp2, fp3, ic1, ic2, ic3, dc1, dc2, dc3, rd1, rd2, rd3, ts1, ts2, ts3)
-
-	tests := []test{
-		{
-			name:   "happy path",
-			fp:     fp1,
-			random: newTestReader([4]byte{1, 1, 1, 1}),
-			now: func() time.Time {
-				return time.Unix(0, ts1)
-			},
-			ic: ic1,
-			dc: dc1,
-			expect: GUID{
-				0x6e, 0x77, 0x80, 0x80, 0xf4, 0xf6, 0x90, 0x5d, 0x0, 0x0, 0x80,
-				0x89, 0xf, 0x0, 0x0, 0x0, 0x0, 0x0, 0xfe, 0x83, 0xcd, 0x1, 0xb0,
-				0x80, 0x81, 0x1,
-			},
+	gen := stdGenerator{
+		Fingerprint: 123456,
+		Random:      newTestReader([8]byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		Now: func() time.Time {
+			return time.Unix(0, ts1)
 		},
+		Counter: 0,
+	}
+	g, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for i := range tests {
-		tt := tests[i]
-		t.Run(tt.name, func(t *testing.T) {
-			gen := stdGenerator{
-				Fingerprint: tt.fp,
-				Random:      tt.random,
-				Now:         tt.now,
-				IncrCounter: tt.ic,
-				DecrCounter: tt.dc,
-			}
-			g, err := gen.Generate()
-			if err != nil {
-				if tt.expectErr {
-					// nothing to do
+	// verify fields round-trip correctly
+	if g.Counter() != 0 {
+		t.Fatalf("expected counter 0, got %d", g.Counter())
+	}
+	if g.Fingerprint() != 123456%maxInt {
+		t.Fatalf("expected fingerprint %d, got %d", 123456%maxInt, g.Fingerprint())
+	}
+	nano := g.Time().UnixNano()
+	if nano != ts1 {
+		t.Fatalf("expected time %d, got %d", ts1, nano)
+	}
+	// verify counter incremented
+	if gen.Counter != 1 {
+		t.Fatalf("expected generator counter to be 1, got %d", gen.Counter)
+	}
+}
+
+func TestConcurrentGeneration(t *testing.T) {
+	const goroutines = 100
+	const perGoroutine = 100
+
+	results := make(chan GUID, goroutines*perGoroutine)
+	var wg sync.WaitGroup
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				g, err := New()
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
 					return
 				}
-				t.Fatalf("unexpected error: %v", err)
+				results <- g
 			}
+		}()
+	}
 
-			if !reflect.DeepEqual(g, tt.expect) {
-				t.Fatalf("expected:\n%s\n     got:\n%s", tt.expect.String(), g.String())
-			}
-		})
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]struct{}, goroutines*perGoroutine)
+	for g := range results {
+		s := g.String()
+		if len(s) != byteSize {
+			t.Fatalf("expected string length %d, got %d: %s", byteSize, len(s), s)
+		}
+		if _, exists := seen[s]; exists {
+			t.Fatalf("duplicate GUID detected: %s", s)
+		}
+		seen[s] = struct{}{}
+	}
+
+	if len(seen) != goroutines*perGoroutine {
+		t.Fatalf("expected %d unique GUIDs, got %d", goroutines*perGoroutine, len(seen))
+	}
+}
+
+func TestCounterWraparound(t *testing.T) {
+	gen := &stdGenerator{
+		Fingerprint: 42,
+		Random:      newTestReader([8]byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		Now: func() time.Time {
+			return time.Now().UTC()
+		},
+		Counter: int32(maxInt - 1),
+	}
+
+	// generate with counter at maxInt-1
+	g, err := gen.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Counter() != int32(maxInt-1) {
+		t.Fatalf("expected counter %d, got %d", maxInt-1, g.Counter())
+	}
+	// counter should have wrapped to 0 (maxInt is out of range for filter)
+	if gen.Counter != 0 {
+		t.Fatalf("expected counter to wrap to 0, got %d", gen.Counter)
+	}
+
+	// next generate should use counter 0
+	g2, err := gen.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g2.Counter() != 0 {
+		t.Fatalf("expected counter 0 after wrap, got %d", g2.Counter())
 	}
 }
 
 func BenchmarkNew(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		_, _ = NewRandom()
+		_, _ = New()
 	}
 }
 
 func BenchmarkNewWithOptions(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		_, _ = NewRandom(WithPrefixBytes('f', 'u'))
+		_, _ = New(WithPrefixBytes('f', 'u'))
+
 	}
 }

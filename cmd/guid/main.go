@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -75,7 +74,9 @@ func main() {
 
 	// check prefix
 	if len(prefix) >= 2 {
-		guid.SetGlobalPrefixBytes(prefix[0], prefix[1])
+		if err := guid.SetGlobalPrefixBytes(prefix[0], prefix[1]); err != nil {
+			log.Fatalf("invalid prefix: %v", err)
+		}
 	}
 
 	var guids []guid.GUID
@@ -96,7 +97,7 @@ func main() {
 	}
 
 	if sep == nl {
-		sep = string([]byte{0x0D, 0x0A})
+		sep = "\n"
 	}
 	out := strings.Join(guidStrs, sep)
 	_, wErr := writeTo.Write([]byte(out))
@@ -121,16 +122,14 @@ func scanGUID(s string, isJSON bool) {
 	}
 
 	p1, p2 := g.PrefixBytes()
-	cu, cd := g.Counters()
 
 	if isJSON {
 		out := map[string]string{
-			"prefix":            string([]byte{p1, p2}),
-			"timestamp":         g.Time().Format(time.ANSIC),
-			"fingerprint":       fmt.Sprintf("%d", g.Fingerprint()),
-			"increment_counter": fmt.Sprintf("%d", cu),
-			"decrement_counter": fmt.Sprintf("%d", cd),
-			"random":            fmt.Sprintf("%d", g.Random()),
+			"prefix":      string([]byte{p1, p2}),
+			"timestamp":   g.Time().Format(time.ANSIC),
+			"fingerprint": fmt.Sprintf("%d", g.Fingerprint()),
+			"counter":     fmt.Sprintf("%d", g.Counter()),
+			"random":      fmt.Sprintf("%d", g.Random()),
 		}
 		data, _ := json.Marshal(out)
 		_, _ = fmt.Fprintf(os.Stdout, string(data))
@@ -140,8 +139,7 @@ func scanGUID(s string, isJSON bool) {
 	_, _ = fmt.Fprintf(os.Stderr, "%sPREFIX%s:      %s\n", green, nocolor, string([]byte{p1, p2}))
 	_, _ = fmt.Fprintf(os.Stderr, "%sTIMESTAMP%s:   %s\n", green, nocolor, g.Time().Format(time.ANSIC))
 	_, _ = fmt.Fprintf(os.Stderr, "%sFINGERPRINT%s: %d\n", green, nocolor, g.Fingerprint())
-	_, _ = fmt.Fprintf(os.Stderr, "%sCOUNTER \u2191%s:   %d\n", green, nocolor, cu)
-	_, _ = fmt.Fprintf(os.Stderr, "%sCOUNTER \u2193%s:   %d\n", green, nocolor, cd)
+	_, _ = fmt.Fprintf(os.Stderr, "%sCOUNTER%s:     %d\n", green, nocolor, g.Counter())
 	_, _ = fmt.Fprintf(os.Stderr, "%sRANDOM%s:      %d\n", green, nocolor, g.Random())
 }
 
@@ -164,7 +162,7 @@ func generateSerially(n uint) []guid.GUID {
 	buffer := make([]guid.GUID, 0, n)
 	var i uint
 	for i < n {
-		buffer = append(buffer, guid.New())
+		buffer = append(buffer, guid.MustNew())
 		i++
 	}
 
@@ -172,34 +170,15 @@ func generateSerially(n uint) []guid.GUID {
 }
 
 func generateAsync(n uint) []guid.GUID {
-	buffer := make([]guid.GUID, 0, n)
-	firehose := make(chan guid.GUID)
-	ctx, cancel := context.WithCancel(context.Background())
+	buffer := make([]guid.GUID, n)
 	var wg sync.WaitGroup
-	var i uint
-	for i < n {
+	for i := uint(0); i < n; i++ {
 		wg.Add(1)
-		go func() {
-			firehose <- guid.New()
-		}()
-		i++
+		go func(idx uint) {
+			defer wg.Done()
+			buffer[idx] = guid.MustNew()
+		}(i)
 	}
-
-	go func(ctx context.Context) {
-		for {
-			select {
-			case <-ctx.Done():
-				close(firehose)
-				return
-			case g := <-firehose:
-				buffer = append(buffer, g)
-				wg.Done()
-			}
-		}
-	}(ctx)
-
 	wg.Wait()
-	cancel()
-
 	return buffer
 }
