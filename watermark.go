@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 )
 
-// Sign applies the GUID's metadata to a SHA256 hash of the input data
-func (g GUID) Sign(in []byte) []byte {
+// Watermark folds the GUID's bytes into a SHA256 hash of the input data.
+// This is not cryptographic signing. It is a lightweight tracing mechanism
+// for associating a GUID with a piece of data.
+func (g GUID) Watermark(in []byte) []byte {
 	// cant digest what we don't have
 	if len(in) == 0 {
 		return nil
@@ -34,10 +36,10 @@ func (g GUID) Sign(in []byte) []byte {
 	return out
 }
 
-// DidSign returns true when this GUID was used to sign the hex string
-// This function will return false immediately if the input string is either not
-// hex-encoded or generated from a SHA256 hash
-func (g GUID) DidSign(in string) bool {
+// HasWatermark returns true when this GUID's bytes are present in the
+// given hex-encoded hash. Returns false if the input is not valid hex
+// or not SHA256-sized.
+func (g GUID) HasWatermark(in string) bool {
 	sum, err := hex.DecodeString(in)
 	if err != nil {
 		return false

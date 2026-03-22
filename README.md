@@ -136,24 +136,24 @@ g := guid.MustNew()
 g[0], g[1] = 'a', 'b'
 ```
 
-### Signing
+### Watermarking
 
-A GUID can watermark data by folding its bytes into a SHA256 hash. This is not cryptographic signing. It is a lightweight mechanism for associating a GUID with a piece of data.
+A GUID can watermark data by folding its bytes into a SHA256 hash. This is not cryptographic signing. It is a lightweight tracing mechanism for associating a GUID with a piece of data.
 
 ```go
 g := guid.MustNew()
 data := []byte("some payload")
 
-sig := g.Sign(data)
-fmt.Printf("Signature: %s\n", sig) // hex-encoded
+wm := g.Watermark(data)
+fmt.Printf("Watermark: %s\n", wm) // hex-encoded
 
-// verify
-if g.DidSign(string(sig)) {
+// check
+if g.HasWatermark(string(wm)) {
 	fmt.Println("verified")
 }
 ```
 
-Note: `Sign` uses bitwise OR to fold GUID bytes into the hash. Multiple GUIDs can appear to have signed the same data (false positives are possible). This is suitable for tagging and tracing, not for authentication.
+Note: `Watermark` uses bitwise OR to fold GUID bytes into the hash. Multiple GUIDs can appear to match the same watermarked data (false positives are possible). This is suitable for tagging and tracing, not for authentication.
 
 ### Custom Generator
 
